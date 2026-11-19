@@ -11,6 +11,9 @@ import type {
   ModelOption,
   Room,
   RoomInput,
+  IntegrationState,
+  RegisteredTool,
+  ToolExecutionLog,
 } from "@/lib/shared/types";
 
 async function call<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
@@ -44,6 +47,18 @@ export const api = {
   deleteBot: (id: string) => call(`/api/bots/${id}`, { method: "DELETE" }),
   getMemory: (id: string) => call<{ content: string; path: string; limit: { lines: number; bytes: number } }>(`/api/bots/${id}/memory`),
   saveMemory: (id: string, content: string) => call<{ content: string }>(`/api/bots/${id}/memory`, { method: "PUT", json: { content } }),
+  getRoomMemory: (id: string) => call<{ content: string; path: string; limit: { lines: number; bytes: number } }>(`/api/rooms/${id}/memory`),
+  saveRoomMemory: (id: string, content: string) => call<{ content: string }>(`/api/rooms/${id}/memory`, { method: "PUT", json: { content } }),
+  searchMemory: (query: string, scope?: string, scopeId?: string, limit?: number) =>
+    call<{ query: string; count: number; results: unknown[] }>("/api/memory", {
+      method: "POST",
+      json: { action: "search", query, scope, scopeId, limit },
+    }),
+  reindexMemory: (scope?: string, scopeId?: string) =>
+    call<{ ok: boolean; reindexed: number }>("/api/memory", {
+      method: "POST",
+      json: { action: "reindex", scope, scopeId },
+    }),
   createRoom: (input: RoomInput) => call<{ room: Room }>("/api/rooms", { method: "POST", json: input }),
   updateRoom: (id: string, patch: Partial<RoomInput>) => call<{ room: Room }>(`/api/rooms/${id}`, { method: "PATCH", json: patch }),
   deleteRoom: (id: string) => call(`/api/rooms/${id}`, { method: "DELETE" }),
@@ -65,4 +80,34 @@ export const api = {
     call<{ server: McpServer }>("/api/connections/mcp", { method: "POST", json: input }),
   removeMcpServer: (id: string) => call(`/api/connections/mcp/${id}`, { method: "DELETE" }),
   testMcpServer: (id: string) => call<{ tools: number }>(`/api/connections/mcp/${id}/test`, { method: "POST" }),
+  // Integrations & dynamic tool registry
+  listIntegrations: () => call<{ integrations: IntegrationState[] }>("/api/integrations"),
+  getIntegration: (id: string) => call<{ integration: IntegrationState; actions: unknown[] }>(`/api/integrations/${id}`),
+  connectIntegration: (id: string, credentials?: Record<string, string>) =>
+    call<{ integration: IntegrationState }>(`/api/integrations/${id}`, { method: "POST", json: { credentials } }),
+  disconnectIntegration: (id: string) => call<{ integration: IntegrationState }>(`/api/integrations/${id}`, { method: "DELETE" }),
+  testIntegration: (id: string) =>
+    call<{ ok: boolean; executionMode: string; message: string; actionsCount: number }>(`/api/integrations/${id}/test`, { method: "POST" }),
+  listTools: (params?: { category?: string; source?: string; enabled?: boolean; integrationId?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.category) q.set("category", params.category);
+    if (params?.source) q.set("source", params.source);
+    if (params?.integrationId) q.set("integrationId", params.integrationId);
+    if (params?.enabled !== undefined) q.set("enabled", String(params.enabled));
+    const qs = q.toString();
+    return call<{ tools: RegisteredTool[] }>(`/api/tools${qs ? `?${qs}` : ""}`);
+  },
+  getTool: (id: string) => call<{ tool: RegisteredTool }>(`/api/tools/${id}`),
+  registerTool: (tool: Record<string, unknown>) => call<{ tool: RegisteredTool }>("/api/tools", { method: "POST", json: tool }),
+  enableTool: (id: string) => call<{ tool: RegisteredTool }>(`/api/tools/${id}`, { method: "PATCH", json: { action: "enable" } }),
+  disableTool: (id: string) => call<{ tool: RegisteredTool }>(`/api/tools/${id}`, { method: "PATCH", json: { action: "disable" } }),
+  removeTool: (id: string) => call<{ success: boolean }>(`/api/tools/${id}`, { method: "DELETE" }),
+  getToolExecutionLogs: (params?: { toolId?: string; botId?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.toolId) q.set("toolId", params.toolId);
+    if (params?.botId) q.set("botId", params.botId);
+    if (params?.limit) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return call<{ logs: ToolExecutionLog[] }>(`/api/tools/logs${qs ? `?${qs}` : ""}`);
+  },
 };

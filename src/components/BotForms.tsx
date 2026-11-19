@@ -4,7 +4,7 @@ import clsx from "clsx";
 import { Check } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/client/api";
-import type { Bot, BotInput } from "@/lib/shared/types";
+import type { Bot, BotInput, Room } from "@/lib/shared/types";
 import { useApp } from "./OpenCrewBotApp";
 import { ModelPicker } from "./ModelPicker";
 import { Button, Drawer, Field, Mascot, Segmented, Toggle, inputClass } from "./ui";
@@ -288,6 +288,89 @@ export function MemoryEditor({ bot }: { bot: Bot }) {
         disabled={content === null}
         spellCheck={false}
         aria-label="MEMORY.md"
+        className={clsx(inputClass, "h-[50vh] min-h-[240px] resize-y rounded-2xl p-4 font-mono text-[12.5px] leading-relaxed")}
+      />
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-[12px] text-faint" title={meta?.path}>
+          MEMORY.md · {lines} {lines === 1 ? "line" : "lines"}
+          {meta && lines > meta.limit.lines ? ` · first ${meta.limit.lines} load` : ""}
+        </span>
+        <span className="flex shrink-0 gap-2">
+          {dirty && (
+            <Button size="sm" variant="ghost" onClick={() => setContent(saved)}>
+              Revert
+            </Button>
+          )}
+          <Button size="sm" variant="primary" disabled={!dirty || saving} onClick={save}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export function RoomMemoryEditor({ room }: { room: Room }) {
+  const { state, toast } = useApp();
+  const [content, setContent] = useState<string | null>(null);
+  const [saved, setSaved] = useState("");
+  const [meta, setMeta] = useState<{ path: string; limit: { lines: number; bytes: number } } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const dirty = content !== null && content !== saved;
+  const version = state.memoryVersion[`room:${room.id}`] ?? 0;
+
+  const dirtyRef = useRef(dirty);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
+  // Load, and reload when a room member writes to room memory unless you have unsaved edits.
+  useEffect(() => {
+    if (dirtyRef.current) return;
+    let cancelled = false;
+    api
+      .getRoomMemory(room.id)
+      .then((data) => {
+        if (cancelled) return;
+        setSaved(data.content);
+        setContent(data.content);
+        setMeta({ path: data.path, limit: data.limit });
+      })
+      .catch((error) => toast(error instanceof Error ? error.message : "Couldn't load room memory."));
+    return () => {
+      cancelled = true;
+    };
+  }, [room.id, version, toast]);
+
+  const save = async () => {
+    if (content === null) return;
+    setSaving(true);
+    try {
+      const data = await api.saveRoomMemory(room.id, content);
+      setSaved(data.content);
+      setContent(data.content);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Couldn't save room memory.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const lines = content ? content.trimEnd().split("\n").length : 0;
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-center text-[13px] leading-relaxed text-mute">
+        Shared memory for {room.name}. All room members have access to these shared notes and decisions. Plain Markdown, so edit away.
+      </p>
+      {!room.sharedMemory && (
+        <p className="rounded-xl bg-warn-soft px-3.5 py-2.5 text-[13px] text-warn">Shared memory is disabled for this room in Settings.</p>
+      )}
+      <textarea
+        value={content ?? ""}
+        onChange={(e) => setContent(e.target.value)}
+        disabled={content === null}
+        spellCheck={false}
+        aria-label="Room MEMORY.md"
         className={clsx(inputClass, "h-[50vh] min-h-[240px] resize-y rounded-2xl p-4 font-mono text-[12.5px] leading-relaxed")}
       />
       <div className="flex items-center justify-between gap-2">

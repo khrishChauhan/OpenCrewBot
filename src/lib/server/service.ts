@@ -1,5 +1,5 @@
 // What the API routes call. Keeps validation and side effects in one place.
-import { existsSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Bot, BotInput, ChatMessage, ConversationId, ConversationSummary, Room, RoomInput } from "@/lib/shared/types";
@@ -7,11 +7,12 @@ import { DATA_DIR } from "./config";
 import { InputError } from "./errors";
 import * as store from "./db";
 import { publish } from "./bus";
-import { DEFAULT_MODEL } from "./models";
 import { deleteWorkspace, writeMemory } from "./memory-files";
-import { forgetConversation, resetBot, runTurn, runningBots, stopConversation } from "./runtime";
+import { forgetConversation, resetBot, runTurn, runningBots, stopConversation, isBotBusy } from "./runtime";
 import { messagePreview } from "@/lib/shared/preview";
 import { roomConversationId, runRoom } from "./rooms";
+import { taskEngine } from "./task-engine";
+import { DEFAULT_AGENTS, DEFAULT_ROOMS, DEFAULT_AGENT_HANDLES } from "./workforce-defaults";
 
 export { InputError };
 
@@ -23,6 +24,7 @@ export function boot(): Promise<void> {
   g.__opencrewbotBoot ??= (async () => {
     await sweepInterrupted();
     await seed();
+    await taskEngine.init();
   })();
   return g.__opencrewbotBoot;
 }
@@ -43,57 +45,43 @@ async function sweepInterrupted() {
 
 const SEED_MARKER = join(DATA_DIR, ".seeded");
 
-async function seed() {
-  if (existsSync(SEED_MARKER)) return;
-  const tools = { webSearch: true, memory: true, codeMode: false, browser: false, askUser: true };
-  const scout = await createBot({
-    name: "Scout",
-    title: "Research",
-    description: "Finds things out on the web and comes back with sourced answers.",
-    instructions:
-      "Research before answering anything time-sensitive. Search, read the best two or three sources, then answer with the URLs you used. Say plainly when sources disagree or you couldn't verify something.",
-    emoji: "🔭",
-    color: "#2f7df6",
-    model: DEFAULT_MODEL,
-    tools: { ...tools, codeMode: true },
-    approval: "ask",
-    pinned: true,
-  });
-  const quill = await createBot({
-    name: "Quill",
-    title: "Writing",
-    description: "Turns notes and research into clear posts, docs and emails.",
-    instructions:
-      "Write in plain, specific language. Match the person's voice once you know it, and keep their style preferences in memory. Offer one tight draft, not three options.",
-    emoji: "✒️",
-    color: "#e0663d",
-    model: DEFAULT_MODEL,
-    tools: { ...tools, webSearch: false },
-    approval: "ask",
-    pinned: false,
-  });
-  const atlas = await createBot({
-    name: "Atlas",
-    title: "Planning",
-    description: "Breaks goals into steps, keeps track of decisions, and pulls in teammates.",
-    instructions:
-      "Turn vague goals into a short, ordered plan with owners. Keep decisions and open questions in memory. In rooms, hand research to @scout and drafting to @quill.",
-    emoji: "🧭",
-    color: "#1f9d6b",
-    model: DEFAULT_MODEL,
-    tools,
-    approval: "ask",
-    pinned: false,
-  });
-  await createRoom({
-    name: "Studio",
-    topic: "Content and launches",
-    emoji: "🎬",
-    memberIds: [atlas.id, scout.id, quill.id],
-    leadId: atlas.id,
-    responder: "auto",
-    pinned: true,
-  });
+export async function seed(): Promise<void> {
+  const existingBots = await store.listBots();
+  const botByHandle = new Map(existingBots.map((b) => [b.handle, b]));
+
+  // Seed default 8 workforce agents idempotently
+  for (const agentDef of DEFAULT_AGENTS) {
+    if (!botByHandle.has(agentDef.handle)) {
+      const created = await createBot(agentDef);
+      botByHandle.set(created.handle, created);
+    }
+  }
+
+  const existingRooms = await store.listRooms();
+  const existingRoomNames = new Set(existingRooms.map((r) => r.name));
+
+  // Seed default 4 collaboration rooms idempotently
+  for (const roomDef of DEFAULT_ROOMS) {
+    if (!existingRoomNames.has(roomDef.name)) {
+      const memberIds = roomDef.memberHandles
+        .map((h) => botByHandle.get(h)?.id)
+        .filter((id): id is string => Boolean(id));
+      const leadId = botByHandle.get(roomDef.leadHandle)?.id ?? memberIds[0] ?? null;
+
+      await createRoom({
+        name: roomDef.name,
+        topic: roomDef.topic,
+        emoji: roomDef.emoji,
+        memberIds,
+        leadId,
+        responder: roomDef.responder,
+        pinned: roomDef.pinned,
+        instructions: roomDef.instructions,
+        sharedMemory: roomDef.sharedMemory,
+      });
+    }
+  }
+
   writeFileSync(SEED_MARKER, new Date().toISOString());
 }
 
@@ -125,6 +113,8 @@ export async function createBot(input: BotInput): Promise<Bot> {
     name: input.name.trim(),
     connections: input.connections ?? [],
     handle: await uniqueHandle(input.handle || input.name),
+    status: input.status ?? "active",
+    skills: input.skills ?? [],
     createdAt: new Date().toISOString(),
   };
   await store.saveBot(bot);
@@ -142,6 +132,10 @@ export async function updateBot(id: string, patch: Partial<BotInput>): Promise<B
     ...patch,
     id: bot.id,
     createdAt: bot.createdAt,
+    status: patch.status !== undefined ? patch.status : bot.status ?? "active",
+    skills: patch.skills !== undefined ? patch.skills : bot.skills ?? [],
+    role: patch.role !== undefined ? patch.role : bot.role,
+    outputPreferences: patch.outputPreferences !== undefined ? patch.outputPreferences : bot.outputPreferences,
     tools: { ...bot.tools, ...(patch.tools ?? {}) },
     handle: patch.handle !== undefined || patch.name !== undefined ? await uniqueHandle(patch.handle || patch.name || bot.handle, id) : bot.handle,
   };
@@ -152,6 +146,14 @@ export async function updateBot(id: string, patch: Partial<BotInput>): Promise<B
 }
 
 export async function deleteBot(id: string): Promise<void> {
+  const bot = await store.getBot(id);
+  if (!bot) throw new InputError("That bot doesn't exist.");
+  if (isBotBusy(id)) {
+    throw new InputError("Cannot delete an agent while it is executing a turn.");
+  }
+  if (DEFAULT_AGENT_HANDLES.includes(bot.handle)) {
+    throw new InputError(`Agent '${bot.name}' (@${bot.handle}) is a default workforce agent and cannot be deleted.`);
+  }
   await stopConversation(`dm:${id}`);
   await resetBot(id);
   await store.deleteBotRow(id);
@@ -184,6 +186,8 @@ export async function createRoom(input: RoomInput): Promise<Room> {
     id: randomUUID().slice(0, 8),
     name: clean.name.trim(),
     leadId: clean.leadId && clean.memberIds.includes(clean.leadId) ? clean.leadId : (clean.memberIds[0] ?? null),
+    instructions: clean.instructions,
+    sharedMemory: clean.sharedMemory ?? true,
     createdAt: new Date().toISOString(),
   };
   await store.saveRoom(room);

@@ -16,6 +16,7 @@ import { costUsd, findModel } from "./models";
 import { createMockModel } from "./mock-model";
 import { announceLiveView, createSession, releaseSession } from "./browserbase";
 import { buildConnectorTools, connectionsVersion } from "./connectors";
+import { toolRegistryVersion } from "./tool-registry";
 import { systemPrompt } from "./prompt";
 import { buildTools, toolCategory, toolLabel, toolPreview, toolSources } from "./tools";
 
@@ -38,6 +39,8 @@ interface State {
   sessions: Map<string, Session>;
   /** `${conversationId}|${botId}` → tail of that bot's turn queue */
   chains: Map<string, Promise<unknown>>;
+  /** botId → tail of that bot's global turn queue across all conversations */
+  botChains: Map<string, Promise<unknown>>;
   /** conversationId → bots with a turn in flight */
   running: Map<ConversationId, Set<string>>;
   /** `${conversationId}|${botId}` → the turn currently folding events */
@@ -52,10 +55,12 @@ const state: State = (g.__opencrewbotRuntime ??= {
   runtimes: new Map(),
   sessions: new Map(),
   chains: new Map(),
+  botChains: new Map(),
   running: new Map(),
   folders: new Map(),
   stopEpoch: new Map(),
 });
+state.botChains ??= new Map();
 
 const key = (conversationId: ConversationId, botId: string) => `${conversationId}|${botId}`;
 
@@ -72,6 +77,7 @@ async function signatureOf(bot: Bot): Promise<string> {
     approval: bot.approval,
     connections: bot.connections,
     connectionsVersion: bot.connections.length ? await connectionsVersion() : 0,
+    toolRegistryVersion: await toolRegistryVersion(),
     mock: isMock(),
   });
 }
@@ -127,9 +133,13 @@ async function buildRuntime(bot: Bot): Promise<BotRuntime> {
   return { signature: await signatureOf(bot), holder, controller, ready: controller.init(), closeConnectors: connectors.close };
 }
 
-function isBotBusy(botId: string): boolean {
+export function isBotBusy(botId: string): boolean {
   for (const bots of state.running.values()) if (bots.has(botId)) return true;
-  return false;
+  return state.botChains?.has(botId) ?? false;
+}
+
+export function isBotActive(botId: string): boolean {
+  return isBotBusy(botId);
 }
 
 async function dropRuntime(botId: string): Promise<void> {
@@ -165,12 +175,33 @@ async function sessionFor(bot: Bot, conversationId: ConversationId): Promise<Ses
   const cached = state.sessions.get(k);
   if (cached && cached.thread.getId() === threadId) return cached;
   const session = await runtime.controller.createSession({ resourceId: OWNER_ID, scope: conversationId, threadId });
-  await session.permissions.setForCategory({ category: "read", policy: "allow" });
-  await session.permissions.setForCategory({ category: "edit", policy: "allow" });
-  await session.permissions.setForCategory({ category: "other", policy: "allow" });
-  // Connected apps and MCP servers act on real accounts: ask first unless the bot has full access.
-  await session.permissions.setForCategory({ category: "mcp", policy: bot.approval === "full" ? "allow" : "ask" });
-  await session.permissions.setForCategory({ category: "execute", policy: bot.approval === "full" ? "allow" : "ask" });
+  const isFull = bot.approval === "full";
+  const isControlled = bot.approval === "controlled";
+
+  if (isFull) {
+    // FULL ACCESS: All permitted tools execute without approval
+    await session.permissions.setForCategory({ category: "read", policy: "allow" });
+    await session.permissions.setForCategory({ category: "edit", policy: "allow" });
+    await session.permissions.setForCategory({ category: "execute", policy: "allow" });
+    await session.permissions.setForCategory({ category: "mcp", policy: "allow" });
+    await session.permissions.setForCategory({ category: "other", policy: "allow" });
+  } else if (isControlled) {
+    // CONTROLLED ACCESS: Read-only tools execute automatically; mutating tools require approval
+    await session.permissions.setForCategory({ category: "read", policy: "allow" });
+    await session.permissions.setForCategory({ category: "edit", policy: "ask" });
+    await session.permissions.setForCategory({ category: "execute", policy: "ask" });
+    await session.permissions.setForCategory({ category: "mcp", policy: "ask" });
+    await session.permissions.setForCategory({ category: "other", policy: "ask" });
+  } else {
+    // ASK FIRST: Every tool action requires explicit human approval
+    await session.permissions.setForCategory({ category: "read", policy: "ask" });
+    await session.permissions.setForCategory({ category: "edit", policy: "ask" });
+    await session.permissions.setForCategory({ category: "execute", policy: "ask" });
+    await session.permissions.setForCategory({ category: "mcp", policy: "ask" });
+    await session.permissions.setForCategory({ category: "other", policy: "ask" });
+  }
+  // Questions to the user suspend execution for answering rather than requiring tool pre-approval
+  await session.permissions.setForTool({ toolName: "ask_user", policy: "allow" });
   state.sessions.set(k, session);
   return session;
 }
@@ -369,14 +400,17 @@ export interface TurnRequest {
  * or null when Stop cancelled it before it started. */
 export function runTurn(request: TurnRequest): Promise<ChatMessage | null> {
   const k = key(request.conversationId, request.bot.id);
+  const botId = request.bot.id;
   const epoch = state.stopEpoch.get(request.conversationId) ?? 0;
-  const previous = state.chains.get(k) ?? Promise.resolve();
-  const next = previous
-    .catch(() => {})
+  const previousConv = state.chains.get(k) ?? Promise.resolve();
+  const previousBot = state.botChains.get(botId) ?? Promise.resolve();
+  const next = Promise.all([previousConv.catch(() => {}), previousBot.catch(() => {})])
     .then(() => ((state.stopEpoch.get(request.conversationId) ?? 0) === epoch ? executeTurn(request) : null));
   state.chains.set(k, next);
+  state.botChains.set(botId, next);
   void next.finally(() => {
     if (state.chains.get(k) === next) state.chains.delete(k);
+    if (state.botChains.get(botId) === next) state.botChains.delete(botId);
   });
   return next;
 }

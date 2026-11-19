@@ -27,11 +27,12 @@ export function useConnections(version: number) {
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
-  /** What a bot can be given: connected apps, then MCP servers. */
+  /** What a bot can be given: connected apps, then MCP servers, then integrations. */
   const options: ConnectionOption[] = data
     ? [
         ...data.composio.apps.filter((a) => a.connected).map((a) => ({ id: `composio:${a.slug}`, name: a.name, kind: "composio" as const, logo: a.logo })),
         ...data.mcpServers.map((s) => ({ id: `mcp:${s.id}`, name: s.name, kind: "mcp" as const })),
+        ...(data.integrations ?? []).filter((i) => i.status === "connected").map((i) => ({ id: `integration:${i.id}`, name: i.name, kind: "integration" as const })),
       ]
     : [];
 

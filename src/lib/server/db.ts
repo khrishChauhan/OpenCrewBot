@@ -10,11 +10,10 @@ import type { Bot, ChatMessage, ConversationId, Room } from "@/lib/shared/types"
 const g = globalThis as unknown as { __opencrewbotDb?: { url: string; schema?: number; client: Promise<Client> } };
 
 /** Bump when a table is added, so a hot-reloaded server re-runs the CREATE statements. */
-const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 5;
 
-async function open(): Promise<Client> {
-  const db = createClient({ url: APP_DB_URL });
-  await db.batch(
+export async function migrate(client: Client): Promise<void> {
+  await client.batch(
     [
       "CREATE TABLE IF NOT EXISTS bots (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
       "CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
@@ -31,10 +30,137 @@ async function open(): Promise<Client> {
         generation INTEGER NOT NULL DEFAULT 0,
         last_read_at TEXT
       )`,
+      `CREATE TABLE IF NOT EXISTS plans (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        idempotency_key TEXT,
+        created_at TEXT NOT NULL,
+        data TEXT NOT NULL
+      )`,
+      "CREATE INDEX IF NOT EXISTS plans_by_conv ON plans (conversation_id, created_at)",
+      "CREATE INDEX IF NOT EXISTS plans_by_idempotency ON plans (idempotency_key)",
+      `CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL,
+        step_identifier TEXT NOT NULL,
+        assigned_bot_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        data TEXT NOT NULL,
+        UNIQUE(plan_id, step_identifier)
+      )`,
+      "CREATE INDEX IF NOT EXISTS tasks_by_plan ON tasks (plan_id, status)",
+      "CREATE INDEX IF NOT EXISTS tasks_by_bot ON tasks (assigned_bot_id, status)",
+      `CREATE TABLE IF NOT EXISTS memory_records (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        category TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        source_author TEXT,
+        source_conversation_id TEXT,
+        source_task_id TEXT,
+        content TEXT NOT NULL,
+        original_ref TEXT,
+        confidence TEXT NOT NULL DEFAULT 'verified',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        data TEXT NOT NULL
+      )`,
+      "CREATE INDEX IF NOT EXISTS memory_records_scope ON memory_records (scope, scope_id, created_at)",
+      "CREATE INDEX IF NOT EXISTS memory_records_cat ON memory_records (scope, scope_id, category)",
+      `CREATE TABLE IF NOT EXISTS memory_chunks (
+        id TEXT PRIMARY KEY,
+        record_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        source_ref TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      "CREATE INDEX IF NOT EXISTS memory_chunks_scope ON memory_chunks (scope, scope_id)",
+      "CREATE INDEX IF NOT EXISTS memory_chunks_hash ON memory_chunks (content_hash)",
+      `CREATE TABLE IF NOT EXISTS memory_embeddings (
+        chunk_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        dimensions INTEGER NOT NULL,
+        embedding TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      "CREATE INDEX IF NOT EXISTS memory_embeddings_prov ON memory_embeddings (provider, model)",
+      `CREATE TABLE IF NOT EXISTS memory_summaries (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        source_hash TEXT NOT NULL,
+        source_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(scope, scope_id)
+      )`,
+      "CREATE INDEX IF NOT EXISTS memory_summaries_scope ON memory_summaries (scope, scope_id)",
+      `CREATE TABLE IF NOT EXISTS tools (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        category TEXT NOT NULL,
+        source TEXT NOT NULL,
+        integration_id TEXT,
+        input_schema TEXT NOT NULL,
+        output_schema TEXT,
+        required_permission TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        config TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      "CREATE INDEX IF NOT EXISTS idx_tools_cat ON tools (category)",
+      "CREATE INDEX IF NOT EXISTS idx_tools_source ON tools (source)",
+      "CREATE INDEX IF NOT EXISTS idx_tools_integration ON tools (integration_id)",
+      `CREATE TABLE IF NOT EXISTS tool_execution_logs (
+        id TEXT PRIMARY KEY,
+        tool_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        integration_id TEXT,
+        bot_id TEXT,
+        conversation_id TEXT,
+        execution_mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        input TEXT,
+        output TEXT,
+        error TEXT,
+        duration_ms INTEGER,
+        created_at TEXT NOT NULL
+      )`,
+      "CREATE INDEX IF NOT EXISTS idx_tool_logs_tool ON tool_execution_logs (tool_id, created_at)",
+      "CREATE INDEX IF NOT EXISTS idx_tool_logs_bot ON tool_execution_logs (bot_id, created_at)",
+      `CREATE TABLE IF NOT EXISTS integrations (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        category TEXT NOT NULL,
+        auth_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        execution_mode TEXT NOT NULL,
+        config TEXT,
+        error TEXT,
+        connected_at TEXT,
+        updated_at TEXT NOT NULL
+      )`,
     ],
     "write",
   );
-  return db;
+}
+
+async function open(): Promise<Client> {
+  const client = createClient({ url: APP_DB_URL });
+  await migrate(client);
+  return client;
 }
 
 export function db(): Promise<Client> {

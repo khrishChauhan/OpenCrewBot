@@ -158,6 +158,8 @@ function applyEvent(state: AppState, event: ServerEvent): AppState {
     }
     case "memory-changed":
       return { ...state, memoryVersion: { ...state.memoryVersion, [event.botId]: (state.memoryVersion[event.botId] ?? 0) + 1 } };
+    case "room-memory-changed":
+      return { ...state, memoryVersion: { ...state.memoryVersion, [`room:${event.roomId}`]: (state.memoryVersion[`room:${event.roomId}`] ?? 0) + 1 } };
     case "browser-session": {
       const liveViews = { ...state.liveViews };
       if (event.liveUrl) liveViews[event.botId] = event.liveUrl;
@@ -165,6 +167,8 @@ function applyEvent(state: AppState, event: ServerEvent): AppState {
       return { ...state, liveViews };
     }
     case "connections-changed":
+    case "tools-changed":
+    case "integrations-changed":
       return { ...state, connectionsVersion: state.connectionsVersion + 1 };
     case "bots-changed":
     case "rooms-changed":

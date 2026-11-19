@@ -3,6 +3,7 @@
 import type { Bot, ChatMessage, Room, RouteNote } from "@/lib/shared/types";
 import { listBots, listMessages } from "./db";
 import { pickResponders } from "./jev";
+import { readScopeMemory } from "./memory-files";
 import { runTurn, stopEpochOf } from "./runtime";
 
 /** How many bot-to-bot @mention hops one message from the person can start. */
@@ -50,16 +51,28 @@ function roomPrompt(room: Room, bot: Bot, members: Bot[], lines: string[], hando
   const roster = members
     .map((b) => `- ${b.name} (@${b.handle})${b.title ? `, ${b.title}` : ""}${b.id === bot.id ? " (you)" : ""}`)
     .join("\n");
-  return [
+  const sections = [
     `[Group room "${room.name}"${room.topic ? `, topic: ${room.topic}` : ""}]`,
-    `Members:\n${roster}`,
+  ];
+  if (room.instructions?.trim()) {
+    sections.push(`Room Instructions:\n${room.instructions.trim()}`);
+  }
+  sections.push(`Members:\n${roster}`);
+  if (room.sharedMemory) {
+    const mem = readScopeMemory("room", room.id);
+    if (mem.trim()) {
+      sections.push(`Shared Room Memory (accessible to all members; update with room_memory_add):\n${mem.trim()}`);
+    }
+  }
+  sections.push(
     `New in the room since your last message:\n${lines.join("\n") || "(nothing new)"}`,
     "---",
     handoff
       ? `A teammate @mentioned you. Do the part they asked of you, as ${bot.name}.`
       : `Reply to the latest message as ${bot.name}.`,
     "Add only your part; don't repeat what teammates already said. To hand something to a teammate, @mention their handle.",
-  ].join("\n\n");
+  );
+  return sections.join("\n\n");
 }
 
 async function decideResponders(room: Room, members: Bot[], text: string, history: ChatMessage[], bots: Map<string, Bot>) {

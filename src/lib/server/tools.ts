@@ -7,10 +7,12 @@ import { createTavilyCrawlTool, createTavilyExtractTool, createTavilySearchTool 
 import { QuickJsCodeModeTransport } from "@mastra/quickjs";
 import { z } from "zod";
 import type { Bot, Source } from "@/lib/shared/types";
-import { appendMemory, editMemory } from "./memory-files";
+import { appendMemory, editMemory, appendScopeMemory } from "./memory-files";
+import { searchMemories } from "./memory-store";
 import { publish } from "./bus";
 import { keys } from "./config";
 import { mcpServerNames } from "./connectors";
+import { getCachedToolCategory } from "./tool-registry";
 
 export const CODE_MODE_TOOL = "execute_typescript";
 
@@ -39,6 +41,51 @@ function memoryTools(botId: string): ToolsInput {
         const result = editMemory(botId, find, replace);
         if (result.ok) publish({ type: "memory-changed", botId });
         return result;
+      },
+    }),
+    memory_search: createTool({
+      id: "memory_search",
+      description:
+        "Search your memory and shared context semantically for relevant notes, past decisions, facts, or instructions.",
+      inputSchema: z.object({
+        query: z.string().min(1).describe("The search query or concept to look up."),
+        scope: z.enum(["all", "agent", "room", "project", "user"]).optional().describe("Scope to search. Defaults to 'agent'."),
+        limit: z.number().int().min(1).max(20).optional().describe("Max results (default 5)."),
+      }),
+      execute: async ({ query, scope, limit }) => {
+        const effectiveScope = scope ?? "agent";
+        const results = await searchMemories(query, {
+          scope: effectiveScope === "all" ? undefined : effectiveScope,
+          scopeId: effectiveScope === "agent" ? botId : undefined,
+          limit: limit ?? 5,
+        });
+        return {
+          query,
+          count: results.length,
+          results: results.map((r) => ({
+            scope: r.scope,
+            scopeId: r.scopeId,
+            content: r.content,
+            score: Number(r.score.toFixed(3)),
+            category: r.category,
+            sourceRef: r.sourceRef,
+          })),
+        };
+      },
+    }),
+    room_memory_add: createTool({
+      id: "room_memory_add",
+      description:
+        "Add a shared note, decision, or finding to a group room's shared memory, visible to all room members.",
+      inputSchema: z.object({
+        roomId: z.string().min(1).describe("The room ID."),
+        note: z.string().min(1).describe("The note or decision to share with the room."),
+        section: z.string().optional().describe("Optional heading to file it under."),
+      }),
+      execute: async ({ roomId, note, section }) => {
+        appendScopeMemory("room", roomId, note, section, botId);
+        publish({ type: "room-memory-changed", roomId });
+        return { saved: true, roomId };
       },
     }),
   };
@@ -74,6 +121,7 @@ export function buildTools(bot: Bot): BotToolset {
   }
   if (bot.tools.memory) {
     Object.assign(tools, memoryTools(bot.id));
+    capabilities.push("Remember facts (memory_add), fix memory (memory_edit), and search memories semantically (memory_search).");
   }
   if (bot.tools.codeMode) {
     // The program runs in a QuickJS (WebAssembly) isolate with no filesystem or
@@ -103,6 +151,11 @@ export function buildTools(bot: Bot): BotToolset {
 const READ_ONLY_VERB = /^(get|list|search|read|fetch|find|view|show|describe|lookup|query)(_|$)/;
 
 export function toolCategory(toolName: string): ToolCategory | null {
+  // Check dynamic tool registry first
+  const dynamicCategory = getCachedToolCategory(toolName);
+  if (dynamicCategory) return dynamicCategory;
+
+  if (toolName === "memory_search") return "read";
   if (["web_search", "read_page", "crawl_site", "ask_user", CODE_MODE_TOOL].includes(toolName)) return "read";
   // Composio: looking up actions is free; running them ("multi execute", the remote workbench) asks.
   if (toolName.startsWith("COMPOSIO_")) {
@@ -112,7 +165,7 @@ export function toolCategory(toolName: string): ToolCategory | null {
     const action = toolName.split("_").slice(2).join("_");
     return READ_ONLY_VERB.test(action) ? "read" : "mcp";
   }
-  if (toolName.startsWith("memory_")) return "edit";
+  if (toolName.startsWith("memory_") || toolName.startsWith("room_memory_")) return "edit";
   if (toolName.startsWith("browser_")) {
     return /snapshot|screenshot|scroll|wait|tabs|close|get_|read|extract|console/.test(toolName) ? "read" : "execute";
   }
@@ -152,6 +205,21 @@ export function toolLabel(name: string, args: unknown): { label: string; detail?
     const [, id, ...rest] = name.split("_");
     return { label: `${mcpServerNames.get(id) ?? "MCP"}: ${rest.join(" ")}` };
   }
+  if (name.startsWith("github_")) {
+    const action = name.slice("github_".length).replace(/_/g, " ");
+    const detail = a.owner && a.repo ? `${a.owner}/${a.repo}${a.title ? ` #${a.title}` : ""}` : (a.path ? String(a.path) : undefined);
+    return { label: `GitHub: ${action}`, detail };
+  }
+  if (name.startsWith("gmail_")) {
+    const action = name.slice("gmail_".length).replace(/_/g, " ");
+    const detail = a.to ? `To: ${a.to}${a.subject ? ` | ${a.subject}` : ""}` : (a.query ? `Query: ${a.query}` : undefined);
+    return { label: `Gmail: ${action}`, detail };
+  }
+  if (name.startsWith("slack_")) {
+    const action = name.slice("slack_".length).replace(/_/g, " ");
+    const detail = a.channel ? `#${a.channel}${a.text ? ` - ${String(a.text).slice(0, 40)}` : ""}` : undefined;
+    return { label: `Slack: ${action}`, detail };
+  }
   switch (name) {
     case "web_search":
       return { label: "Searched the web", detail: String(a.query ?? "") };
@@ -165,6 +233,10 @@ export function toolLabel(name: string, args: unknown): { label: string; detail?
       return { label: "Saved to memory", detail: String(a.note ?? "") };
     case "memory_edit":
       return { label: "Updated memory" };
+    case "memory_search":
+      return { label: "Searched memory", detail: String(a.query ?? "") };
+    case "room_memory_add":
+      return { label: "Saved to room memory", detail: String(a.note ?? "") };
     case CODE_MODE_TOOL:
       return { label: "Ran code" };
     case "ask_user":

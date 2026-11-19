@@ -1,12 +1,17 @@
 // Turns a bot's chosen connections into tools: Composio apps share one
-// session, and each MCP server gets its own client.
+// session, each MCP server gets its own client, and dynamic integration tools
+// are loaded from the central tool registry.
 import type { ToolsInput } from "@mastra/core/agent";
+import { createTool } from "@mastra/core/tools";
+import { z } from "zod";
 import type { Bot } from "@/lib/shared/types";
 import { composioTools } from "./composio";
 import { getSetting, setSetting } from "./db";
 import { publish } from "./bus";
 import { listServers, mcpTools } from "./mcp-servers";
 import { keys } from "./config";
+import { executeTool, getToolsForBot } from "./tool-registry";
+import { getIntegrationAction } from "./integrations";
 
 const VERSION_KEY = "connections.version";
 
@@ -63,6 +68,29 @@ export async function buildConnectorTools(bot: Bot, clientId: string): Promise<C
       capabilities.push(`Use tools from ${names.join(", ")} (the mcp_* tools). Actions that change things ask the person first unless you have full access.`);
     }
     for (const e of result.errors) capabilities.push(`Couldn't connect to ${e}. Say so if asked.`);
+  }
+
+  // Load verified integration tools & dynamic tools from registry for this bot
+  const dynamicTools = await getToolsForBot(bot);
+  for (const regTool of dynamicTools) {
+    const act = regTool.integrationId ? getIntegrationAction(regTool.id) : undefined;
+    const zodSchema = act?.action.zodSchema ?? z.record(z.string(), z.unknown());
+    tools[regTool.id] = createTool({
+      id: regTool.id,
+      description: regTool.description,
+      inputSchema: zodSchema,
+      execute: async (input) => {
+        return await executeTool(regTool.id, input, { botId: bot.id });
+      },
+    });
+  }
+  if (dynamicTools.length > 0) {
+    const integrationNames = [...new Set(dynamicTools.map((t) => t.integrationId).filter(Boolean))];
+    if (integrationNames.length > 0) {
+      capabilities.push(
+        `Use external tools from ${integrationNames.map((n) => (n ? n.toUpperCase() : "")).join(", ")}. Actions ask the person first unless you have full access.`,
+      );
+    }
   }
 
   return { tools, capabilities, close };

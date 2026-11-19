@@ -8,6 +8,15 @@ export function systemPrompt(bot: Bot, capabilities: string[], toolInstructions:
   sections.push(
     `You are ${bot.name}${bot.title ? `, ${bot.title}` : ""}.${bot.description ? ` ${bot.description}` : ""}`,
   );
+  if (bot.role) sections.push(`## Your Role\n${bot.role}`);
+  if (bot.outputPreferences) {
+    const prefs = [
+      bot.outputPreferences.format ? `Format: ${bot.outputPreferences.format}` : "",
+      bot.outputPreferences.tone ? `Tone: ${bot.outputPreferences.tone}` : "",
+      bot.outputPreferences.detailLevel ? `Detail Level: ${bot.outputPreferences.detailLevel}` : "",
+    ].filter(Boolean);
+    if (prefs.length) sections.push(`## Output Preferences\n${prefs.join(", ")}`);
+  }
   if (bot.instructions.trim()) sections.push(`## Your instructions\n${bot.instructions.trim()}`);
 
   sections.push(

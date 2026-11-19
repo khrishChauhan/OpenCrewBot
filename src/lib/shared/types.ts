@@ -1,6 +1,6 @@
 // Types shared by the server and the browser. Everything here is plain JSON.
 
-export type ApprovalMode = "ask" | "full";
+export type ApprovalMode = "ask" | "full" | "controlled" | "ask_first";
 
 export interface BotTools {
   /** Tavily search, extract and crawl. */
@@ -13,6 +13,12 @@ export interface BotTools {
   browser: boolean;
   /** The bot may stop and ask you a question with a card in chat. */
   askUser: boolean;
+}
+
+export interface BotOutputPreferences {
+  format?: "markdown" | "bullet" | "json" | "structured";
+  tone?: string;
+  detailLevel?: "concise" | "detailed" | "standard";
 }
 
 export interface Bot {
@@ -32,6 +38,10 @@ export interface Bot {
   approval: ApprovalMode;
   pinned: boolean;
   createdAt: string;
+  role?: string;
+  status?: "active" | "inactive";
+  skills?: string[];
+  outputPreferences?: BotOutputPreferences;
 }
 
 export type BotInput = Omit<Bot, "id" | "createdAt" | "handle" | "connections"> & { handle?: string; connections?: string[] };
@@ -48,6 +58,8 @@ export interface Room {
   responder: RoomResponder;
   pinned: boolean;
   createdAt: string;
+  instructions?: string;
+  sharedMemory?: boolean;
 }
 
 export type RoomInput = Omit<Room, "id" | "createdAt">;
@@ -138,9 +150,12 @@ export type ServerEvent =
   | { type: "bots-changed" }
   | { type: "rooms-changed" }
   | { type: "memory-changed"; botId: string }
+  | { type: "room-memory-changed"; roomId: string }
   /** A bot's Browserbase live view opened (url) or closed (null). */
   | { type: "browser-session"; botId: string; liveUrl: string | null }
-  | { type: "connections-changed" };
+  | { type: "connections-changed" }
+  | { type: "tools-changed" }
+  | { type: "integrations-changed" };
 
 /** An app from Composio's catalog, with this install's connection state. */
 export interface ComposioApp {
@@ -162,12 +177,112 @@ export interface McpServer {
 export interface ConnectionsState {
   composio: { enabled: boolean; apps: ComposioApp[]; error?: string };
   mcpServers: McpServer[];
+  integrations?: IntegrationState[];
 }
 
 /** Something a bot can be given access to. */
 export interface ConnectionOption {
   id: string;
   name: string;
-  kind: "composio" | "mcp";
+  kind: "composio" | "mcp" | "integration";
   logo?: string;
+}
+
+// ── dynamic tools and integrations (Phase 5) ─────────────────────────────
+
+export type ToolCategory = "read" | "edit" | "execute" | "mcp" | "other";
+export type ToolSource = "built-in" | "integration" | "mcp" | "custom";
+export type ExecutionMode = "LIVE" | "MOCK" | "UNAVAILABLE";
+
+export interface RegisteredTool {
+  id: string;
+  name: string;
+  description: string;
+  category: ToolCategory;
+  source: ToolSource;
+  integrationId?: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  requiredPermission: ToolCategory;
+  enabled: boolean;
+  authorizedAgentIds?: string[];
+  config?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IntegrationState {
+  id: string;
+  name: string;
+  slug: string;
+  category: string;
+  status: "connected" | "disconnected" | "error";
+  executionMode: ExecutionMode;
+  authType: string;
+  hasCredentials: boolean;
+  error?: string;
+  connectedAt?: string;
+  actionsCount: number;
+}
+
+export interface ToolExecutionLog {
+  id: string;
+  toolId: string;
+  toolName: string;
+  integrationId?: string;
+  botId?: string;
+  conversationId?: string;
+  executionMode: ExecutionMode;
+  status: "success" | "error" | "denied";
+  input: unknown;
+  output?: unknown;
+  error?: string;
+  durationMs?: number;
+  createdAt: string;
+}
+
+// ── plans and autonomous tasks ──────────────────────────────────────────
+
+export type PlanStatus = "planning" | "running" | "completed" | "failed" | "cancelled";
+
+export interface Plan {
+  id: string;
+  conversationId: string;
+  goal: string;
+  status: PlanStatus;
+  taskIds: string[];
+  idempotencyKey?: string;
+  createdAt: string;
+  completedAt?: string;
+  summary?: string;
+}
+
+export type TaskStatus =
+  | "pending"
+  | "ready"
+  | "running"
+  | "awaiting_approval"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "timed_out";
+
+export interface Task {
+  id: string;
+  planId: string;
+  stepIdentifier: string;
+  assignedBotId: string;
+  title: string;
+  description: string;
+  dependencies: string[]; // Prerequisite task IDs that must complete first
+  status: TaskStatus;
+  retryCount: number;
+  maxRetries: number;
+  timeoutMs: number;
+  startedAt?: string;
+  completedAt?: string;
+  output?: string;
+  error?: string;
+  approvalRequired: boolean;
+  createdAt: string;
 }

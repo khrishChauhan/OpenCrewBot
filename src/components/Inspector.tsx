@@ -4,7 +4,7 @@ import { ExternalLink, Pencil, X } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { api } from "@/lib/client/api";
 import type { Bot, Room } from "@/lib/shared/types";
-import { BotForm, MemoryEditor } from "./BotForms";
+import { BotForm, MemoryEditor, RoomMemoryEditor } from "./BotForms";
 import { ModelPicker } from "./ModelPicker";
 import { RoomForm } from "./RoomForms";
 import { useApp, type InspectorTab } from "./OpenCrewBotApp";
@@ -242,7 +242,7 @@ function RoomInspector({ room, tab, setTab }: { room: Room; tab: InspectorTab; s
   const { state, open } = useApp();
   const members = room.memberIds.map((id) => state.bots.find((b) => b.id === id)).filter((b): b is Bot => Boolean(b));
   const running = state.summaries[`room:${room.id}`]?.running ?? [];
-  const current = tab === "settings" ? "settings" : "members";
+  const current = tab === "settings" ? "settings" : tab === "memory" ? "memory" : "members";
   return (
     <>
       <div className="flex flex-col items-center px-6 pt-2 pb-5 text-center">
@@ -255,6 +255,7 @@ function RoomInspector({ room, tab, setTab }: { room: Room; tab: InspectorTab; s
             onChange={setTab}
             tabs={[
               { value: "members", label: "Members" },
+              { value: "memory", label: "Memory" },
               { value: "settings", label: "Settings" },
             ]}
           />
@@ -284,6 +285,7 @@ function RoomInspector({ room, tab, setTab }: { room: Room; tab: InspectorTab; s
             {members.length === 0 && <p className="px-3 py-6 text-center text-sm text-mute">No members yet. Add some in Settings.</p>}
           </ul>
         )}
+        {current === "memory" && <RoomMemoryEditor room={room} />}
         {current === "settings" && <RoomForm key={JSON.stringify(room)} room={room} />}
       </div>
     </>
